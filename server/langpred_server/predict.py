@@ -122,6 +122,152 @@ class PredictionService:
             explanation=full.meta.explanation,
         )
 
+    # ------------------------------------------------------------- forecast
+
+    def forecast(
+        self,
+        trace_name: str,
+        budget_cap_usd: float | None = None,
+    ) -> AgentPrediction:
+        """Predict outcomes for a **hypothetical** trace with this name —
+        before any steps exist. Powers reject-upfront and route-at-start by
+        letting callers ask "what will this kind of run typically cost?"
+        without first creating a trace.
+
+        Uses the same-name cohort directly (median/p90 of final outcomes,
+        aggregated tool / model histograms). Falls back to the global cohort
+        if the named one is empty, and to a zero prediction if there's no
+        cohort at all.
+        """
+        self._ensure_built()
+        assert self._models is not None
+        models = self._models.get(trace_name) or self._models.get("") or _ProjectModels(
+            knn=KNNPredictor([]), gbm=None, n_complete=0
+        )
+        cohort = models.knn._traces  # type: ignore[attr-defined]
+
+        # Build an "empty" trajectory placeholder so the assembly helper has
+        # something to compute remaining_* and elapsed_* against. We set
+        # ``start_ts == end_ts`` so elapsed is exactly 0 (no clock-skew slop).
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        placeholder = Trajectory(
+            trace_id="forecast-" + trace_name,
+            name=trace_name,
+            start_ts=now,
+            end_ts=now,
+            steps=[],
+        )
+
+        prefix = self._cohort_prefix_prediction(cohort)
+        agent = _to_agent_prediction(placeholder, prefix, "knn" if cohort else "heuristic", budget_cap_usd)
+        return agent
+
+    @staticmethod
+    def _cohort_prefix_prediction(cohort: list[Trajectory]) -> PrefixPrediction:
+        """Aggregate a cohort directly into a PrefixPrediction (no kNN
+        ranking — this is the prior, used when there's no query trajectory)."""
+        from collections import Counter
+
+        from .ml.knn import _quantile, _zero_prediction
+
+        if not cohort:
+            return _zero_prediction()
+
+        usd = [c.total_usd for c in cohort]
+        steps = [float(c.step_count) for c in cohort]
+        seconds = [c.wall_seconds for c in cohort]
+        tokens = [float(c.total_tokens) for c in cohort]
+        prompt_t = [float(c.prompt_tokens) for c in cohort]
+        completion_t = [float(c.completion_tokens) for c in cohort]
+        llm_calls = [float(c.llm_call_count) for c in cohort]
+        tool_calls = [float(c.tool_call_count) for c in cohort]
+        compute_s = [c.compute_seconds for c in cohort]
+        io_s = [c.io_seconds for c in cohort]
+        offrails = sum(1 for c in cohort if c.status in ("error", "cancelled")) / len(cohort)
+
+        # First-step distribution and likely first model.
+        first_kind: Counter[str] = Counter()
+        first_tool: Counter[str] = Counter()
+        first_model: Counter[str] = Counter()
+        first_step_usd: list[float] = []
+        first_step_secs: list[float] = []
+        for c in cohort:
+            if not c.steps:
+                continue
+            step = c.steps[0]
+            label = "generation" if step.kind == "generation" else "tool_call"
+            first_kind[label] += 1
+            if label == "tool_call":
+                first_tool[step.tool_name or step.name or "unknown"] += 1
+            elif step.model:
+                first_model[step.model] += 1
+            first_step_usd.append(step.usd)
+            first_step_secs.append(step.latency_ms / 1000.0)
+
+        total = len(cohort)
+        next_kind_dist = {k: c / total for k, c in first_kind.items()}
+        next_tool_dist = {k: c / total for k, c in first_tool.items()}
+        likely_model = first_model.most_common(1)[0][0] if first_model else None
+
+        # Per-tool and per-model histograms over full traces.
+        per_tool: dict[str, list[float]] = {}
+        per_model: dict[str, list[float]] = {}
+        for c in cohort:
+            for t, n in c.tool_histogram().items():
+                per_tool.setdefault(t, [0.0] * total)
+            for m in c.model_cost_histogram():
+                per_model.setdefault(m, [0.0] * total)
+        for i, c in enumerate(cohort):
+            for t, n in c.tool_histogram().items():
+                per_tool[t][i] = float(n)
+            for m, cost in c.model_cost_histogram().items():
+                per_model[m][i] = float(cost)
+
+        tool_call_counts_p50 = {t: _quantile(vs, 0.5) for t, vs in per_tool.items()}
+        tool_call_counts_p90 = {t: _quantile(vs, 0.9) for t, vs in per_tool.items()}
+        usd_by_model_p50 = {m: _quantile(vs, 0.5) for m, vs in per_model.items()}
+        usd_by_model_p90 = {m: _quantile(vs, 0.9) for m, vs in per_model.items()}
+
+        return PrefixPrediction(
+            n_samples=total,
+            confidence=min(0.9, 0.3 + total / 200.0),
+            p50_usd=_quantile(usd, 0.5),
+            p90_usd=_quantile(usd, 0.9),
+            p99_usd=_quantile(usd, 0.99),
+            p50_steps=_quantile(steps, 0.5),
+            p90_steps=_quantile(steps, 0.9),
+            p99_steps=_quantile(steps, 0.99),
+            p50_seconds=_quantile(seconds, 0.5),
+            p90_seconds=_quantile(seconds, 0.9),
+            p99_seconds=_quantile(seconds, 0.99),
+            p50_tokens=_quantile(tokens, 0.5),
+            p90_tokens=_quantile(tokens, 0.9),
+            p50_prompt_tokens=_quantile(prompt_t, 0.5),
+            p90_prompt_tokens=_quantile(prompt_t, 0.9),
+            p50_completion_tokens=_quantile(completion_t, 0.5),
+            p90_completion_tokens=_quantile(completion_t, 0.9),
+            p50_llm_calls=_quantile(llm_calls, 0.5),
+            p50_tool_calls=_quantile(tool_calls, 0.5),
+            p50_compute_seconds=_quantile(compute_s, 0.5),
+            p50_io_seconds=_quantile(io_s, 0.5),
+            offrails_score=offrails,
+            next_kind_distribution=next_kind_dist,
+            next_tool_distribution=next_tool_dist,
+            likely_next_model=likely_model,
+            expected_next_step_usd=_quantile(first_step_usd, 0.5) if first_step_usd else 0.0,
+            expected_next_step_seconds=_quantile(first_step_secs, 0.5)
+            if first_step_secs
+            else 0.0,
+            p_finish_within_one_step=0.0,
+            tool_call_counts_p50=tool_call_counts_p50,
+            tool_call_counts_p90=tool_call_counts_p90,
+            usd_by_model_p50=usd_by_model_p50,
+            usd_by_model_p90=usd_by_model_p90,
+            explanation=f"cohort forecast over {total} finished traces",
+        )
+
     # ------------------------------------------------------------- omnibus
 
     def predict_all(

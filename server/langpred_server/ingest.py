@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Response
 
+from . import alerts as alerts_mod
 from .db import get_store
 from .budget import evaluate as evaluate_budget
 from .schemas import (
@@ -83,16 +84,28 @@ async def ingest(
         if tid:
             touched_trace_ids.add(tid)
 
-    # Re-evaluate any budgets attached to touched traces. Emit a "breached"
-    # header so the SDK can react on the very next response.
+    # Re-evaluate any budgets / alerts attached to touched traces.
     breached: list[str] = []
+    scope_reduce: list[str] = []
+    fired_alerts: list[str] = []
     for tid in touched_trace_ids:
         st = evaluate_budget(tid)
         if st and st.breached:
-            breached.append(tid)
+            if st.on_exceed == "scope_reduce":
+                scope_reduce.append(tid)
+            elif st.on_exceed == "kill":
+                breached.append(tid)
+            # "warn" → log only; SDK takes no action
+        # Alerts are independent of budgets — evaluate unconditionally.
+        fired_alerts.extend(alerts_mod.evaluate_for_trace(tid))
+
     if breached:
         response.headers["X-Langpred-Budget"] = "breached"
         response.headers["X-Langpred-Budget-Traces"] = ",".join(breached)
+    if scope_reduce:
+        response.headers["X-Langpred-Scope-Reduce"] = ",".join(scope_reduce)
+    if fired_alerts:
+        response.headers["X-Langpred-Alerts-Fired"] = ",".join(fired_alerts)
 
     return IngestionResponse(successes=successes, errors=errors)
 

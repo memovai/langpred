@@ -295,6 +295,24 @@ class Trace:
         usd: float,
         on_exceed: str = "kill",
     ) -> BudgetGuard:
+        """Cap predicted total spend. ``on_exceed`` is one of:
+
+        - ``"kill"`` (default) — SDK raises :class:`BudgetExceeded` on breach.
+        - ``"scope_reduce"`` — SDK invokes callbacks registered via
+          :meth:`on_scope_reduce` so the agent can shrink its own work
+          (lower ``max_tokens``, skip optional steps). Keeps the same model
+          so KV cache is preserved.
+        - ``"warn"`` — log only, no kill, no callback.
+
+        Note: there is no ``"downgrade"`` here — switching models mid-trace
+        breaks Anthropic prompt caching and reasoning coherence. Use
+        :meth:`Langpred.forecast` at trace-start to pick a model **before**
+        any KV state has been built.
+        """
+        if on_exceed not in ("kill", "scope_reduce", "warn"):
+            raise ValueError(
+                f"on_exceed must be 'kill' | 'scope_reduce' | 'warn', got {on_exceed!r}"
+            )
         self.transport.post(
             "/api/public/budgets",
             {"trace_id": self.id, "cap_usd": usd, "on_exceed": on_exceed},
@@ -302,3 +320,42 @@ class Trace:
         return BudgetGuard(
             trace=self, transport=self.transport, cap_usd=usd, on_exceed=on_exceed
         )
+
+    # -------------------------------------------------------------- alerts
+
+    def alert_when(
+        self,
+        condition: str,
+        webhook_url: str,
+        min_interval_seconds: float = 30.0,
+    ) -> dict:
+        """Fire a webhook when a condition over the AgentPrediction goes true.
+
+        Condition syntax: ``"<dotted.path> <op> <number>"``. Operators:
+        ``> >= < <= == !=``. Example::
+
+            trace.alert_when("cost.usd_total_p50 > 0.5", "https://...")
+            trace.alert_when("risk.loop_risk > 0.7", "https://...")
+
+        Webhooks are POSTed with the trace_id, condition, value, threshold,
+        and full prediction. Re-fires no more than once per
+        ``min_interval_seconds`` (default 30).
+        """
+        return self.transport.post(
+            "/api/public/alerts",
+            {
+                "trace_id": self.id,
+                "condition": condition,
+                "webhook_url": webhook_url,
+                "min_interval_seconds": min_interval_seconds,
+            },
+        )
+
+    # ----------------------------------------------------- scope-reduce hint
+
+    def on_scope_reduce(self, callback) -> None:
+        """Register a callback invoked when the server signals that this
+        trace should shrink its remaining work (e.g. budget breach with
+        ``on_exceed="scope_reduce"``). The callback takes no arguments —
+        it's a "you should pull in the reins now" notification."""
+        self.transport.register_scope_reduce(self.id, callback)

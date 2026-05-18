@@ -283,6 +283,28 @@ langpred/
 
 ---
 
+## 7.1 Action menu — what we expose
+
+The whole point of prediction is acting on it. We expose five pre-emptive actions, matched to when the signal arrives:
+
+| Action | Stage | Mechanism | KV cache |
+|---|---|---|---|
+| **reject-upfront** | Before trace exists | `lp.forecast(trace_name=...)` returns cohort prediction; caller decides whether to start | n/a |
+| **route-at-start** | Before trace exists | Same `forecast()` call; caller picks model based on `cost.usd_total_p90` | n/a |
+| **alert** | Any step | `trace.alert_when(condition, webhook_url)`; server fires HTTP POST on transition | preserved |
+| **scope-reduce** | Mid-trace | `trace.on_scope_reduce(cb)` + `set_budget(on_exceed="scope_reduce")`; server signals via `X-Langpred-Scope-Reduce` header | **preserved** |
+| **kill** | Any step | `set_budget(on_exceed="kill")`; SDK raises `BudgetExceeded` | invalidated (run ends) |
+
+### Why mid-trace downgrade is **not** in the menu
+
+It's the obvious-looking action we deliberately don't ship. Three reasons:
+
+1. **KV cache.** Anthropic / OpenAI prompt-cache hits are 10% of full input price. A 50K-token cached prefix costs $0.075/call on Opus (cache hit) but $0.15 on the first Sonnet call (cache miss) plus 25% write penalty to re-establish caching. Break-even is ~3 remaining calls on a hot cache — **mid-trace switch loses money in the common case**.
+2. **Chain-of-thought coherence.** Opus's reasoning style isn't drop-in compatible with Sonnet's. Switching mid-stream introduces hallucinations as the new model can't pick up the previous model's scratchpad cleanly.
+3. **Framework support is thin.** LangGraph / Autogen / most agent frameworks bind models at graph-construction time. Even if we signal "downgrade now", the user's agent code probably can't honor it.
+
+The right answer is `route-at-start`: pick the model **before** any KV state exists. `scope-reduce` is the mid-trace fallback — keep the same model, just do less work. This preserves cache and coherence while still bounding spend.
+
 ## 8. Non-goals (for now)
 
 - Full Langfuse UI parity. We ship a minimal dashboard; users keep Langfuse for drill-down (or use mirror mode).

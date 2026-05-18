@@ -61,6 +61,8 @@ class Transport:
         self._last_response_headers: dict[str, str] = {}
         self._last_flush = time.monotonic()
         self._stopped = False
+        # Per-trace scope-reduce callbacks, registered via trace.on_scope_reduce.
+        self._scope_reduce_callbacks: dict[str, list] = {}
         # Best-effort flush at interpreter shutdown.
         atexit.register(self.shutdown)
 
@@ -103,6 +105,20 @@ class Transport:
             self._last_response_headers = dict(r.headers)
             if r.status_code >= 400 and r.status_code != 207:
                 log.warning("Langpred ingestion %s: %s", r.status_code, r.text[:200])
+            # Fire any registered scope-reduce callbacks for traces the server
+            # flagged. We do this synchronously — callbacks are expected to be
+            # cheap (e.g. flip a "shrink context" flag the agent reads).
+            sr_header = r.headers.get("X-Langpred-Scope-Reduce") or r.headers.get(
+                "x-langpred-scope-reduce"
+            )
+            if sr_header:
+                for tid in sr_header.split(","):
+                    tid = tid.strip()
+                    for cb in self._scope_reduce_callbacks.get(tid, []):
+                        try:
+                            cb()
+                        except Exception:
+                            log.exception("scope-reduce callback raised")
         except Exception:  # pragma: no cover
             log.exception("Langpred ingestion failed")
         finally:
@@ -149,3 +165,9 @@ class Transport:
     @property
     def last_headers(self) -> dict[str, str]:
         return dict(self._last_response_headers)
+
+    # ----------------------------------------------------- callback registry
+
+    def register_scope_reduce(self, trace_id: str, callback) -> None:
+        with self._lock:
+            self._scope_reduce_callbacks.setdefault(trace_id, []).append(callback)

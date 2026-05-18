@@ -3,13 +3,37 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from . import alerts as alerts_mod
 from .budget import register as register_budget, status as budget_status
 from .db import get_store
 from .predict import get_service
-from .schemas import AgentPrediction, BudgetRequest, BudgetStatus, Prediction
+from .schemas import (
+    AgentPrediction,
+    AlertRule,
+    AlertRuleStatus,
+    BudgetRequest,
+    BudgetStatus,
+    ForecastRequest,
+    Prediction,
+)
 
 
 router = APIRouter(prefix="/api/public", tags=["predict"])
+
+
+# -------------------------------------------------------- pre-trace forecast
+
+
+@router.post("/forecast", response_model=AgentPrediction)
+async def post_forecast(req: ForecastRequest) -> AgentPrediction:
+    """Forecast for a hypothetical trace — used for reject-upfront and
+    route-at-start decisions before any KV cache exists."""
+    return get_service().forecast(trace_name=req.trace_name)
+
+
+@router.get("/forecast", response_model=AgentPrediction)
+async def get_forecast(trace_name: str) -> AgentPrediction:
+    return get_service().forecast(trace_name=trace_name)
 
 
 @router.get("/predict/{trace_id}", response_model=AgentPrediction)
@@ -66,3 +90,19 @@ async def get_budget_status(trace_id: str) -> BudgetStatus:
     if st is None:
         raise HTTPException(status_code=404, detail="no budget for trace")
     return st
+
+
+# ------------------------------------------------------------------ alerts
+
+
+@router.post("/alerts", response_model=AlertRuleStatus)
+async def create_alert(rule: AlertRule) -> AlertRuleStatus:
+    try:
+        return alerts_mod.register(rule)
+    except alerts_mod.ConditionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/alerts/{trace_id}", response_model=list[AlertRuleStatus])
+async def list_alerts(trace_id: str) -> list[AlertRuleStatus]:
+    return alerts_mod.list_for(trace_id)

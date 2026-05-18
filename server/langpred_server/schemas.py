@@ -327,17 +327,82 @@ class AgentPrediction(BaseModel):
 
 
 class BudgetRequest(BaseModel):
+    """Register a budget. ``on_exceed`` is one of:
+
+    - ``kill``       — flag the trace breached; SDK raises ``BudgetExceeded``.
+    - ``alert``      — server fires the configured webhook(s) only; no kill.
+    - ``scope_reduce`` — server sets ``X-Langpred-Scope-Reduce`` on the next
+      ingestion response; SDK invokes any registered scope-reduce callback so
+      the agent can shrink ``max_tokens``, skip optional steps, etc. KV cache
+      is preserved because the model is **not** switched mid-trace.
+    - ``warn``       — log only.
+
+    Note: ``downgrade`` (mid-trace model switch) is **not** supported. It
+    breaks Anthropic prompt-caching and chain-of-thought coherence. Use the
+    ``GET /api/public/forecast`` endpoint at trace-start instead, to pick the
+    model **before** any KV state exists.
+    """
+
     trace_id: str
     cap_usd: float = Field(..., gt=0)
-    on_exceed: Literal["kill", "downgrade", "warn"] = "kill"
+    on_exceed: Literal["kill", "scope_reduce", "warn"] = "kill"
 
 
 class BudgetStatus(BaseModel):
     trace_id: str
     cap_usd: float
-    on_exceed: Literal["kill", "downgrade", "warn"]
+    on_exceed: Literal["kill", "scope_reduce", "warn"]
     spent_usd: float
     predicted_remaining_p50_usd: float
     predicted_remaining_p90_usd: float
     breached: bool
     breach_reason: str | None = None
+
+
+class AlertRule(BaseModel):
+    """Fire a webhook when a condition over the AgentPrediction goes true.
+
+    Condition syntax is ``path op number`` where path is a dotted field of
+    :class:`AgentPrediction` and op is one of ``> >= < <= == !=``. Examples:
+
+    - ``cost.usd_total_p50 > 0.5``
+    - ``risk.loop_risk > 0.7``
+    - ``resources.steps_remaining_p50 > 20``
+    - ``time.remaining_seconds_p90 > 300``
+
+    The webhook receives a JSON POST with the trace_id, condition, value,
+    threshold, and the full AgentPrediction snapshot. Each rule fires at most
+    once per ``min_interval_seconds`` (default 30) to avoid noise.
+    """
+
+    id: str | None = None
+    trace_id: str
+    condition: str
+    webhook_url: str
+    min_interval_seconds: float = 30.0
+
+
+class AlertRuleStatus(BaseModel):
+    id: str
+    trace_id: str
+    condition: str
+    webhook_url: str
+    last_fired_at: str | None = None
+    fire_count: int = 0
+    last_value: float | None = None
+
+
+class ForecastRequest(BaseModel):
+    """Request a forecast for a **hypothetical** trace before it exists.
+
+    Used for ``reject-upfront`` and ``route-at-start`` patterns — let the
+    caller decide whether to run the agent at all, and which model to use,
+    *before* any KV cache or chain-of-thought state has been built.
+    """
+
+    trace_name: str
+    user_id: str | None = None
+    session_id: str | None = None
+    # Free-form description of the work; not used by the predictor today, but
+    # accepted for future similarity-search.
+    input: Any | None = None

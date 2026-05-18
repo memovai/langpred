@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._ids import env
+from .predict import AgentPrediction
 from .trace import Trace
 from .transport import Transport
 
@@ -41,6 +42,33 @@ class Langpred:
 
     def trace(self, **kwargs: Any) -> Trace:
         return Trace(self.transport, **kwargs)
+
+    # ------------------------------------------------------- pre-trace forecast
+
+    def forecast(
+        self,
+        trace_name: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        input: Any | None = None,
+    ) -> AgentPrediction:
+        """Forecast a hypothetical trace **before** creating it. Powers
+        reject-upfront ("don't even start, predicted cost is too high") and
+        route-at-start ("use Sonnet, not Opus, given the cohort profile")
+        — both safe to act on because no KV cache exists yet.
+
+        Returns the same :class:`AgentPrediction` shape as :meth:`Trace.predict`.
+        """
+        body = self.transport.post(
+            "/api/public/forecast",
+            {
+                "trace_name": trace_name,
+                "user_id": user_id,
+                "session_id": session_id,
+                "input": input,
+            },
+        )
+        return AgentPrediction.from_response(body)
 
     # ------------------------------------------------------- lifecycle ops
 

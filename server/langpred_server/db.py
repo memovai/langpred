@@ -84,6 +84,19 @@ class BudgetRecord:
     updated_at: str = field(default_factory=_now_iso)
 
 
+@dataclass
+class AlertRuleRecord:
+    id: str
+    trace_id: str
+    condition: str
+    webhook_url: str
+    min_interval_seconds: float = 30.0
+    last_fired_at: str | None = None
+    fire_count: int = 0
+    last_value: float | None = None
+    created_at: str = field(default_factory=_now_iso)
+
+
 class Store:
     """Thread-safe in-memory + (optional) sqlite event log."""
 
@@ -93,6 +106,8 @@ class Store:
         self._events: list[StoredEvent] = []
         self._by_trace: dict[str, list[int]] = {}  # trace_id -> indices
         self._budgets: dict[str, BudgetRecord] = {}
+        self._alerts: dict[str, AlertRuleRecord] = {}  # id -> rule
+        self._alerts_by_trace: dict[str, list[str]] = {}  # trace_id -> [rule ids]
         self._sqlite: sqlite3.Connection | None = None
         if self.database_url.startswith("sqlite"):
             self._init_sqlite(self.database_url)
@@ -238,6 +253,24 @@ class Store:
             self._budgets[b.trace_id] = b
             self._persist_budget(b)
 
+    # ----------------------------------------------------------------- alerts
+
+    def add_alert(self, rule: AlertRuleRecord) -> None:
+        with self._lock:
+            self._alerts[rule.id] = rule
+            self._alerts_by_trace.setdefault(rule.trace_id, []).append(rule.id)
+
+    def alerts_for(self, trace_id: str) -> list[AlertRuleRecord]:
+        with self._lock:
+            ids = self._alerts_by_trace.get(trace_id, [])
+            return [self._alerts[i] for i in ids if i in self._alerts]
+
+    def update_alert(self, rule: AlertRuleRecord) -> None:
+        with self._lock:
+            self._alerts[rule.id] = rule
+
+    # ----------------------------------------------------------------- helpers
+
     def _persist_budget(self, b: BudgetRecord) -> None:
         if self._sqlite is None:
             return
@@ -269,6 +302,8 @@ class Store:
             self._events.clear()
             self._by_trace.clear()
             self._budgets.clear()
+            self._alerts.clear()
+            self._alerts_by_trace.clear()
             if self._sqlite is not None:
                 self._sqlite.execute("DELETE FROM events")
                 self._sqlite.execute("DELETE FROM budgets")
