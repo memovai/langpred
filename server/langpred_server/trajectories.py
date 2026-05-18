@@ -92,6 +92,68 @@ class Trajectory:
     def is_complete(self) -> bool:
         return self.status in ("ok", "error", "cancelled") and self.end_ts is not None
 
+    @property
+    def elapsed_seconds(self) -> float:
+        """Time from start until the last step we've seen (or now if open)."""
+        from datetime import datetime, timezone
+
+        if self.start_ts is None:
+            return 0.0
+        last = self.end_ts
+        if last is None and self.steps:
+            last = self.steps[-1].end_ts or self.steps[-1].start_ts
+        if last is None:
+            last = datetime.now(timezone.utc)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        start = self.start_ts
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        return max(0.0, (last - start).total_seconds())
+
+    def tool_histogram(self) -> dict[str, int]:
+        h: dict[str, int] = {}
+        for s in self.steps:
+            if s.is_tool:
+                name = s.tool_name or s.name or "unknown"
+                h[name] = h.get(name, 0) + 1
+        return h
+
+    def model_cost_histogram(self) -> dict[str, float]:
+        h: dict[str, float] = {}
+        for s in self.steps:
+            if s.kind == "generation" and s.model:
+                h[s.model] = h.get(s.model, 0.0) + s.usd
+        return h
+
+    @property
+    def llm_call_count(self) -> int:
+        return sum(1 for s in self.steps if s.kind == "generation")
+
+    @property
+    def tool_call_count(self) -> int:
+        return sum(1 for s in self.steps if s.is_tool)
+
+    @property
+    def compute_seconds(self) -> float:
+        return sum(s.latency_ms for s in self.steps if s.kind == "generation") / 1000.0
+
+    @property
+    def io_seconds(self) -> float:
+        return sum(s.latency_ms for s in self.steps if s.kind != "generation") / 1000.0
+
+    @property
+    def prompt_tokens(self) -> int:
+        return sum(s.prompt_tokens for s in self.steps)
+
+    @property
+    def completion_tokens(self) -> int:
+        return sum(s.completion_tokens for s in self.steps)
+
+    def step_at(self, k: int) -> Step | None:
+        """Zero-indexed access; returns ``None`` past the end."""
+        return self.steps[k] if 0 <= k < len(self.steps) else None
+
     def prefix(self, k: int) -> "Trajectory":
         clipped = Trajectory(
             trace_id=self.trace_id,

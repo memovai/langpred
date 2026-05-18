@@ -15,7 +15,13 @@ from typing import Any, TYPE_CHECKING
 
 from ._ids import new_id
 from .budget import BudgetGuard
-from .predict import CostPrediction, EtaPrediction, OffRailsPrediction
+from .predict import (
+    AgentPrediction,
+    CostPrediction,
+    EtaPrediction,
+    NextActionForecast,
+    OffRailsPrediction,
+)
 
 
 if TYPE_CHECKING:
@@ -245,6 +251,17 @@ class Trace:
 
     # --------------------------------------------------- prediction methods
 
+    def predict(self) -> AgentPrediction:
+        """Full prediction: time + cost + resources + next-action + risk.
+
+        Prefer this over the per-kind methods when you need more than one
+        dimension — it's a single round-trip and the sub-predictions are
+        internally consistent (e.g. cost & time come from the same neighbour
+        cohort).
+        """
+        body = self.transport.get(f"/api/public/predict/{self.id}")
+        return AgentPrediction.from_response(body)
+
     def predict_eta(self) -> EtaPrediction:
         body = self.transport.get(f"/api/public/predict/{self.id}/eta")
         return EtaPrediction.from_response(body)  # type: ignore[return-value]
@@ -256,6 +273,12 @@ class Trace:
     def predict_steps(self) -> EtaPrediction:
         body = self.transport.get(f"/api/public/predict/{self.id}/steps")
         return EtaPrediction.from_response(body)  # type: ignore[return-value]
+
+    def predict_next_action(self) -> NextActionForecast:
+        """What is the agent about to do next? (the trajectory-conditional
+        thesis — distribution over next step kind, top-k tool names, likely
+        model, and a one-step expected cost/time)."""
+        return self.predict().next
 
     def is_off_rails(self, threshold: float = 0.5) -> bool:
         body = self.transport.get(f"/api/public/predict/{self.id}/offrails")

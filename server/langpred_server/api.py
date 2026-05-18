@@ -4,11 +4,23 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from .budget import register as register_budget, status as budget_status
+from .db import get_store
 from .predict import get_service
-from .schemas import BudgetRequest, BudgetStatus, Prediction
+from .schemas import AgentPrediction, BudgetRequest, BudgetStatus, Prediction
 
 
 router = APIRouter(prefix="/api/public", tags=["predict"])
+
+
+@router.get("/predict/{trace_id}", response_model=AgentPrediction)
+async def predict_all(trace_id: str) -> AgentPrediction:
+    """Omnibus prediction: time, cost, resources, next action, and risk."""
+    budget = get_store().get_budget(trace_id)
+    cap = budget.cap_usd if budget else None
+    result = get_service().predict_all(trace_id, budget_cap_usd=cap)
+    if result is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return result
 
 
 @router.get("/predict/{trace_id}/eta", response_model=Prediction)

@@ -45,6 +45,50 @@ PRICE_TABLE: dict[str, tuple[float, float]] = {
 _FALLBACK = (0.003, 0.015)  # treat unknown models as a Sonnet-class price
 
 
+# Model context window sizes (input tokens). Used by
+# :func:`RiskPrediction.context_overflow_risk`. Substring match like prices.
+CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-opus": 200_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-sonnet": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-haiku": 200_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4.1": 1_000_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 32_000,
+    "gpt-3.5": 16_000,
+    "o3-mini": 128_000,
+    "o3": 200_000,
+    "gemini-2.5-pro": 2_000_000,
+    "gemini-1.5-pro": 2_000_000,
+    "gemini-1.5-flash": 1_000_000,
+    "gemini": 128_000,
+    "llama-3": 128_000,
+    "llama": 8_192,
+    "mistral-large": 128_000,
+    "mistral": 32_000,
+    "deepseek": 128_000,
+    "qwen": 128_000,
+}
+
+_DEFAULT_CONTEXT_WINDOW = 128_000
+
+
+def context_window(model: str | None) -> int:
+    """Return the input-token context window for a model (substring match)."""
+    if not model:
+        return _DEFAULT_CONTEXT_WINDOW
+    m = model.lower()
+    for prefix, limit in CONTEXT_WINDOWS.items():
+        if prefix in m:
+            return limit
+    return _DEFAULT_CONTEXT_WINDOW
+
+
 def price_step(model: str | None, prompt_tokens: int, completion_tokens: int) -> float:
     """Return USD for a single LLM call given token counts. Robust to None."""
     if not (prompt_tokens or completion_tokens):

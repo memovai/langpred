@@ -80,14 +80,32 @@ Langfuse adoption is wide; the ingest format is already glue in many stacks. **T
         └────────────────────────────────────────────┘
 ```
 
-The user-facing API surface adds **four verbs** on top of Langfuse:
+### 2.1 The five things we predict
 
-1. `trace.predict_eta()` → `{p50, p90, p99, steps_left_p50, …}`
-2. `trace.predict_cost()` → `{usd_p50, usd_p90, usd_p99, breakdown}`
-3. `trace.set_budget(usd=0.5, on_exceed="kill")` → returns a `BudgetGuard` you check (or raises `BudgetExceeded` inside a context manager)
-4. `trace.is_off_rails(threshold=0.7)` → boolean / score
+"ETA" is a misleading word for what we do — time is just one of five forecasts
+we compute from a single kNN query against the trajectory cohort.
 
-That's it. Everything else (`trace`, `span`, `generation`, `update`, `flush`) is **identical** to Langfuse and forwards 1:1.
+| Dimension | Fields (representative) | Where it comes from |
+|---|---|---|
+| **time** | `total_seconds_p50/90/99`, `remaining_seconds_*`, `next_step_seconds_*`, `compute_seconds_p50` vs `io_seconds_p50` (LLM vs tool I/O), `elapsed_seconds` | neighbour final `wall_seconds`; per-kind step latencies summed |
+| **cost** | `usd_total_*`, `usd_remaining_*`, `next_step_usd_*`, `usd_by_model` (per-model breakdown), `spent_usd` | neighbour final `total_usd`; per-step model-spend histograms |
+| **resources** | `total_tokens_*` (prompt / completion split), `total_steps_*`, `steps_remaining_*`, `llm_calls_p50`, `tool_calls_p50`, **`tool_call_counts`** (per-tool histograms) | neighbour `prompt_tokens` + `completion_tokens`; per-tool count histograms |
+| **next action** | `next_kind_distribution` over `{generation, tool_call, end}`, `top_next_tools` (top-k probs), `likely_next_model`, `p_finish_within_one_step`, `expected_next_step_usd_p50`, `expected_next_step_seconds_p50` | neighbour step at index `(prefix_len+1)` — tally kinds / tool names / models |
+| **risk** | `offrails_risk`, `loop_risk`, `context_overflow_risk`, `budget_overshoot_risk`, `cost_spike_risk`, `notes` | neighbour status; trailing repeat-streak; predicted prompt vs model context window; cap interpolation |
+
+All five share **one kNN cohort** per call — so the numbers are internally consistent (cost remaining ≈ steps remaining × per-step rate, no cross-dimension paradoxes).
+
+### 2.2 SDK surface
+
+The user-facing API surface adds **five verbs** on top of Langfuse:
+
+1. `trace.predict()` → `AgentPrediction` with `.time`, `.cost`, `.resources`, `.next`, `.risk` — single round-trip, all five dimensions.
+2. `trace.predict_eta() / predict_cost() / predict_steps() / predict_next_action() / offrails_score()` → per-dimension shortcuts (return the relevant slice).
+3. `trace.set_budget(usd=0.5, on_exceed="kill")` → returns a `BudgetGuard` you check (or raises `BudgetExceeded` inside a context manager).
+4. `trace.is_off_rails(threshold=0.7)` → boolean shortcut over `risk.offrails_risk`.
+5. The omnibus `AgentPrediction` exposes convenience helpers like `next.most_likely_kind()`, `next.most_likely_tool()`, `risk.any_high`.
+
+Everything else (`trace`, `span`, `generation`, `update`, `flush`, `@observe`) is **identical** to Langfuse and forwards 1:1.
 
 ---
 
@@ -155,6 +173,27 @@ prompt_size_growth_slope  linear regression on prompt sizes over time
 Find the **k=20 nearest completed trajectories** with the same `trace.name` whose prefix at length *k* is closest under L2 in the feature space. Their *final* outcomes give us the empirical distribution → we report p50 / p90 / p99 from the quantiles.
 
 Why kNN first: zero-train, interpretable ("we predict $0.18 because trace-id `abc123` and 19 others looked just like this and cost $0.16–$0.22"), and incrementally updated by appending to an index.
+
+#### kNN powers all five dimensions in one query
+
+Once we have the *k* neighbours, we don't stop at scalar quantiles. We aggregate them five ways and surface each as a sub-prediction:
+
+```
+for neighbour in neighbours:
+    final_outcomes ──▶ time / cost / resources quantiles
+    step[prefix_len+1] ──▶ next-action distribution (kind, tool, model)
+    full tool histogram ──▶ tool_call_counts per tool
+    per-model usd map  ──▶ usd_by_model split
+    status field       ──▶ offrails_risk
+```
+
+This is the load-bearing trick: a single kNN read powers the whole omnibus `AgentPrediction`. It also keeps the dimensions **internally consistent** — there's no path where `cost_remaining` disagrees with `steps_remaining × per_step_cost` because they both come out of the same 20 trajectories.
+
+Risk fields are computed alongside but don't require kNN aggregation:
+- `loop_risk` — trailing-repeat-streak / step_count on the *query* trajectory.
+- `context_overflow_risk` — predicted-p90 prompt tokens vs the running model's `context_window` (from `ml/pricing.py`).
+- `budget_overshoot_risk` — interpolated from p50/p99 of the predicted cost vs the registered cap.
+- `cost_spike_risk` — `expected_next_step_usd / running_per_step_median`.
 
 ### Tier 2 — gradient-boosted regressors (auto-promoted at ≥ 1,000 trajectories per shape)
 Three independent regressors, each `prefix_features → final outcome`:

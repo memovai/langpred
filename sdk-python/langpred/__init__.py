@@ -32,7 +32,18 @@ Two ways to use:
 from .client import Langpred
 from .trace import Generation, Score, Span, Trace
 from .budget import BudgetExceeded, BudgetGuard
-from .predict import EtaPrediction, CostPrediction, OffRailsPrediction
+from .predict import (
+    AgentPrediction,
+    CostForecast,
+    CostPrediction,
+    EtaPrediction,
+    Meta,
+    NextActionForecast,
+    OffRailsPrediction,
+    ResourceForecast,
+    RiskForecast,
+    TimeForecast,
+)
 
 __all__ = [
     "Langpred",
@@ -45,6 +56,13 @@ __all__ = [
     "EtaPrediction",
     "CostPrediction",
     "OffRailsPrediction",
+    "AgentPrediction",
+    "TimeForecast",
+    "CostForecast",
+    "ResourceForecast",
+    "NextActionForecast",
+    "RiskForecast",
+    "Meta",
 ]
 
 __version__ = "0.1.0"
