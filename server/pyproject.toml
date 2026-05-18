@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langpred-server"
+version = "0.1.0"
+description = "Langpred prediction + Langfuse-compatible ingestion server"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "Langpred contributors"}]
+dependencies = [
+  "fastapi>=0.110",
+  "pydantic>=2.5",
+  "uvicorn[standard]>=0.27",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+ml = ["scikit-learn>=1.4", "numpy>=1.26"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+langpred-server = "langpred_server.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["langpred_server*"]

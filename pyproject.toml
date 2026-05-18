@@ -1,0 +1,23 @@
+# Umbrella metadata for `langpred` — actual installable packages live in
+# ./server (langpred-server) and ./sdk-python (langpred). This file exists
+# so editor tooling and `pip install -e .` from the repo root find both.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langpred-monorepo"
+version = "0.1.0"
+description = "Langpred — predict agent ETA, cost, and budget breaches from trajectories. Drop-in for Langfuse."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "Langpred contributors"}]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+]
+
+[tool.setuptools]
+packages = []

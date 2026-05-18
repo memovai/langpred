@@ -1,0 +1,22 @@
+services:
+  langpred:
+    build: .
+    container_name: langpred
+    ports:
+      - "7187:7187"
+    environment:
+      LANGPRED_HOST: 0.0.0.0
+      LANGPRED_PORT: "7187"
+      LANGPRED_DATABASE_URL: sqlite:////data/langpred.db
+      LANGPRED_TRAIN_INTERVAL_SECONDS: "300"
+    volumes:
+      - langpred-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7187/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  langpred-data: {}

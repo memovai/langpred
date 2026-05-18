@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          pip install -e ./server -e ./sdk-python
+          pip install pytest httpx scikit-learn 'uvicorn[standard]'
+      - name: Test
+        run: pytest -q tests/
+      - name: Bench (smoke)
+        run: python benchmarks/eval_predictions.py
