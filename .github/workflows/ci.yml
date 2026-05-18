@@ -17,6 +17,9 @@ jobs:
         run: |
           pip install -e ./server -e ./sdk-python
           pip install pytest httpx scikit-learn 'uvicorn[standard]'
+          # The real Langfuse SDK — used by tests/test_real_langfuse_integration.py
+          # to verify drop-in compatibility against the actual upstream SDK.
+          pip install 'langfuse<3'
       - name: Test
         run: pytest -q tests/
       - name: Bench (smoke)
