@@ -126,6 +126,7 @@ Same constructor, same `trace / span / generation / @observe / flush`. New: `lp.
 git clone https://github.com/memovai/langpred && cd langpred
 pip install -e ./server -e ./sdk-python
 uvicorn langpred_server.main:app --port 7187 &
+open http://localhost:7187/ui/
 python examples/08_action_menu.py     # walks through all 5 actions live
 ```
 
@@ -166,12 +167,13 @@ For pre-trace `forecast()`, we skip the kNN step and aggregate the same-name coh
 
 | | |
 |---|---|
-| **Tests** | 23 / 23 green (includes real-Langfuse SDK integration + all 5 actions) |
+| **Tests** | 28 / 28 green (+ optional real-Langfuse SDK integration when installed) |
 | **Cost MAE** | \$0.10 on synthetic benchmark |
 | **p90 coverage** | 79% (conformal calibration is on deck) |
+| **Local UI** | `http://localhost:7187/ui/` — trace list, detail timeline, prediction cards, budgets, forecast |
 | **Stack** | FastAPI + SQLite + scikit-learn · Python ≥3.10 · no GPU |
 
-**Roadmap:** OTel ingest · dashboard UI · TypeScript SDK · conformal calibration · optional proxy add-on for hard budget enforcement.
+**Roadmap:** OTel ingest · TypeScript SDK · conformal calibration · optional proxy add-on for hard budget enforcement.
 
 ---
 

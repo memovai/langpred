@@ -7,9 +7,11 @@ import logging
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from . import api as predict_api
 from . import ingest as ingest_api
+from . import ui as ui_api
 from .predict import get_service
 from .settings import SETTINGS
 
@@ -56,6 +58,13 @@ app = FastAPI(
 app.include_router(ingest_api.router)
 app.include_router(ingest_api.health_router)
 app.include_router(predict_api.router)
+app.include_router(ui_api.router)
+app.include_router(ui_api.api_router)
+app.mount(
+    "/ui/assets",
+    StaticFiles(directory=ui_api.STATIC_DIR),
+    name="langpred-ui-assets",
+)
 
 
 @app.get("/", include_in_schema=False)
@@ -71,6 +80,8 @@ async def root() -> dict:
             "GET /api/public/predict/{trace_id}/offrails",
             "POST /api/public/budgets",
             "GET /api/public/budgets/{trace_id}/status",
+            "GET /ui/",
+            "GET /api/local/traces",
             "GET /healthz",
         ],
     }

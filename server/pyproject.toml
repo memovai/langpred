@@ -26,3 +26,6 @@ langpred-server = "langpred_server.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["langpred_server*"]
+
+[tool.setuptools.package-data]
+langpred_server = ["static/*"]

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Langpred Local</title>
+    <link rel="stylesheet" href="/ui/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">LP</div>
+          <div>
+            <div class="brand-name">Langpred</div>
+            <div class="brand-subtitle">Local</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-view="traces" type="button">Traces</button>
+          <button class="nav-item" data-view="forecast" type="button">Forecast</button>
+        </nav>
+
+        <form class="project-box" id="projectForm">
+          <label>
+            Public key
+            <input id="publicKey" autocomplete="off" placeholder="default" />
+          </label>
+          <label>
+            Secret key
+            <input id="secretKey" autocomplete="off" type="password" placeholder="local" />
+          </label>
+          <button type="submit">Apply project</button>
+        </form>
+
+        <div class="sidebar-note">
+          <code>LANGFUSE_HOST=http://localhost:7187</code>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Traces</h1>
+            <p id="statusLine">Loading local project.</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="rebuildBtn" type="button">Rebuild models</button>
+            <button id="refreshBtn" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <div class="notice" id="notice" hidden></div>
+
+        <section class="view" id="tracesView">
+          <section class="metrics-grid" aria-label="Trace metrics">
+            <div class="metric">
+              <span>Traces</span>
+              <strong id="metricTraces">0</strong>
+            </div>
+            <div class="metric">
+              <span>Open</span>
+              <strong id="metricOpen">0</strong>
+            </div>
+            <div class="metric">
+              <span>Total cost</span>
+              <strong id="metricCost">$0.0000</strong>
+            </div>
+            <div class="metric">
+              <span>Risk flags</span>
+              <strong id="metricRisk">0</strong>
+            </div>
+          </section>
+
+          <section class="workspace">
+            <div class="trace-pane">
+              <div class="filters">
+                <input id="searchInput" placeholder="Search trace, user, session" />
+                <select id="statusFilter">
+                  <option value="all">All</option>
+                  <option value="open">Open</option>
+                  <option value="ok">OK</option>
+                  <option value="error">Error</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </div>
+              <div class="trace-list" id="traceList"></div>
+            </div>
+
+            <section class="detail-pane" id="detailPane">
+              <div class="empty-state">
+                <h2>No trace selected</h2>
+                <p>Ingest traces and they will appear here with live predictions.</p>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section class="view" id="forecastView" hidden>
+          <section class="forecast-layout">
+            <form class="forecast-form" id="forecastForm">
+              <label>
+                Trace name
+                <input id="forecastName" required placeholder="research_agent" />
+              </label>
+              <label>
+                Metadata JSON
+                <textarea id="forecastMetadata" rows="7" spellcheck="false" placeholder='{"file_count": 100}'></textarea>
+              </label>
+              <label>
+                Input JSON or text
+                <textarea id="forecastInput" rows="7" spellcheck="false" placeholder="Describe the run before it starts"></textarea>
+              </label>
+              <button type="submit">Run forecast</button>
+            </form>
+            <section class="forecast-result" id="forecastResult">
+              <div class="empty-state">
+                <h2>Pre-trace forecast</h2>
+                <p>Estimate price, ETA, next action, and risk before the agent starts.</p>
+              </div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/ui/assets/app.js"></script>
+  </body>
+</html>
