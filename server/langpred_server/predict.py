@@ -4,9 +4,11 @@ folds the result into the omnibus :class:`AgentPrediction`.
 """
 from __future__ import annotations
 
+import json
+import math
 import threading
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .schemas import (
     AgentPrediction,
@@ -39,21 +41,82 @@ class _ProjectModels:
     n_complete: int
 
 
+def _request_profile(input: Any | None, metadata: Any | None) -> tuple[float, float, float]:
+    """Small, dependency-free profile for pre-trace forecast conditioning.
+
+    This deliberately avoids semantic embedding work. It captures the request
+    size plus common workload hints that agent apps already pass in metadata.
+    """
+
+    try:
+        raw = json.dumps(input, sort_keys=True, default=str) if input is not None else ""
+    except TypeError:
+        raw = str(input)
+    size = math.log1p(len(raw))
+
+    md = metadata if isinstance(metadata, dict) else {}
+
+    def number(*keys: str) -> float:
+        for key in keys:
+            value = md.get(key)
+            try:
+                if value is not None:
+                    return math.log1p(max(0.0, float(value)))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    work_units = number("estimated_steps", "max_steps", "task_count", "items")
+    corpus_units = number("file_count", "repo_files", "document_count", "input_tokens")
+    return (size, work_units, corpus_units)
+
+
+def _profile_distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    return sum(abs(x - y) for x, y in zip(a, b))
+
+
+def _condition_cohort(
+    cohort: list[Trajectory],
+    *,
+    input: Any | None,
+    metadata: Any | None,
+) -> tuple[list[Trajectory], bool]:
+    """Narrow a forecast cohort using request-size/workload hints when present."""
+    query = _request_profile(input, metadata)
+    if not cohort or not any(query):
+        return cohort, False
+
+    scored: list[tuple[float, Trajectory]] = []
+    has_candidate_signal = False
+    for traj in cohort:
+        profile = _request_profile(traj.input, traj.metadata)
+        if any(profile):
+            has_candidate_signal = True
+        scored.append((_profile_distance(query, profile), traj))
+    if not has_candidate_signal:
+        return cohort, False
+
+    scored.sort(key=lambda x: x[0])
+    keep = min(len(scored), max(20, len(scored) // 2))
+    return [traj for _dist, traj in scored[:keep]], True
+
+
 class PredictionService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._models: dict[str, _ProjectModels] | None = None
+        self._models: dict[tuple[str, str], _ProjectModels] | None = None
 
     # --------------------------------------------------------------- training
 
     def rebuild(self) -> None:
         trajs = [t for t in all_trajectories() if t.is_complete]
-        groups: dict[str, list[Trajectory]] = {"": []}
+        groups: dict[tuple[str, str], list[Trajectory]] = {}
         for t in trajs:
-            key = t.name or ""
+            project_id = t.project_id or "default"
+            key = (project_id, t.name or "")
             groups.setdefault(key, []).append(t)
-            groups[""].append(t)
-        new_models: dict[str, _ProjectModels] = {}
+            groups.setdefault((project_id, ""), []).append(t)
+        new_models: dict[tuple[str, str], _ProjectModels] = {}
         for key, group in groups.items():
             knn = KNNPredictor(group)
             gbm: GBMPredictor | None = None
@@ -69,9 +132,14 @@ class PredictionService:
 
     # ------------------------------------------------- single-kind (legacy)
 
-    def predict(self, trace_id: str, kind: PredKind) -> Prediction:
+    def predict(
+        self,
+        trace_id: str,
+        kind: PredKind,
+        project_id: str = "default",
+    ) -> Prediction:
         """Return the per-kind :class:`Prediction` (backward-compat endpoint)."""
-        full = self.predict_all(trace_id)
+        full = self.predict_all(trace_id, project_id=project_id)
         if full is None:
             return _empty(trace_id, kind, reason="trace not found")
         if kind == "cost":
@@ -127,6 +195,11 @@ class PredictionService:
     def forecast(
         self,
         trace_name: str,
+        project_id: str = "default",
+        user_id: str | None = None,
+        session_id: str | None = None,
+        input: Any | None = None,
+        metadata: Any | None = None,
         budget_cap_usd: float | None = None,
     ) -> AgentPrediction:
         """Predict outcomes for a **hypothetical** trace with this name —
@@ -141,10 +214,15 @@ class PredictionService:
         """
         self._ensure_built()
         assert self._models is not None
-        models = self._models.get(trace_name) or self._models.get("") or _ProjectModels(
-            knn=KNNPredictor([]), gbm=None, n_complete=0
+        models = (
+            self._models.get((project_id, trace_name))
+            or self._models.get((project_id, ""))
+            or _ProjectModels(
+                knn=KNNPredictor([]), gbm=None, n_complete=0
+            )
         )
         cohort = models.knn._traces  # type: ignore[attr-defined]
+        cohort, conditioned = _condition_cohort(cohort, input=input, metadata=metadata)
 
         # Build an "empty" trajectory placeholder so the assembly helper has
         # something to compute remaining_* and elapsed_* against. We set
@@ -157,11 +235,20 @@ class PredictionService:
             name=trace_name,
             start_ts=now,
             end_ts=now,
+            project_id=project_id,
+            user_id=user_id,
+            session_id=session_id,
+            input=input,
+            metadata=metadata,
             steps=[],
         )
 
         prefix = self._cohort_prefix_prediction(cohort)
-        agent = _to_agent_prediction(placeholder, prefix, "knn" if cohort else "heuristic", budget_cap_usd)
+        if conditioned and prefix.explanation:
+            prefix.explanation += " (request-conditioned)"
+        agent = _to_agent_prediction(
+            placeholder, prefix, "knn" if cohort else "heuristic", budget_cap_usd
+        )
         return agent
 
     @staticmethod
@@ -271,11 +358,14 @@ class PredictionService:
     # ------------------------------------------------------------- omnibus
 
     def predict_all(
-        self, trace_id: str, budget_cap_usd: float | None = None
+        self,
+        trace_id: str,
+        project_id: str = "default",
+        budget_cap_usd: float | None = None,
     ) -> AgentPrediction | None:
         """Compute the full :class:`AgentPrediction` for a trace."""
         self._ensure_built()
-        traj = get_trajectory(trace_id)
+        traj = get_trajectory(trace_id, project_id=project_id)
         if traj is None:
             return None
         models = self._pick_models(traj)
@@ -292,10 +382,14 @@ class PredictionService:
     def _pick_models(self, traj: Trajectory) -> _ProjectModels:
         assert self._models is not None
         key = traj.name or ""
-        same = self._models.get(key)
+        project_id = traj.project_id or "default"
+        same = self._models.get((project_id, key))
         if same and same.n_complete >= 5:
             return same
-        return self._models.get("", _ProjectModels(knn=KNNPredictor([]), gbm=None, n_complete=0))
+        return self._models.get(
+            (project_id, ""),
+            _ProjectModels(knn=KNNPredictor([]), gbm=None, n_complete=0),
+        )
 
     def _heuristic(self, traj: Trajectory, models: _ProjectModels) -> PrefixPrediction:
         cohort: list[Trajectory] = []

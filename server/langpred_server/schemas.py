@@ -330,12 +330,14 @@ class BudgetRequest(BaseModel):
     """Register a budget. ``on_exceed`` is one of:
 
     - ``kill``       — flag the trace breached; SDK raises ``BudgetExceeded``.
-    - ``alert``      — server fires the configured webhook(s) only; no kill.
     - ``scope_reduce`` — server sets ``X-Langpred-Scope-Reduce`` on the next
       ingestion response; SDK invokes any registered scope-reduce callback so
       the agent can shrink ``max_tokens``, skip optional steps, etc. KV cache
       is preserved because the model is **not** switched mid-trace.
     - ``warn``       — log only.
+
+    ``quantile`` controls how conservative predicted-budget enforcement is:
+    ``p50`` is the old default, while ``p90``/``p99`` are safer for hard caps.
 
     Note: ``downgrade`` (mid-trace model switch) is **not** supported. It
     breaks Anthropic prompt-caching and chain-of-thought coherence. Use the
@@ -346,12 +348,14 @@ class BudgetRequest(BaseModel):
     trace_id: str
     cap_usd: float = Field(..., gt=0)
     on_exceed: Literal["kill", "scope_reduce", "warn"] = "kill"
+    quantile: Literal["p50", "p90", "p99"] = "p50"
 
 
 class BudgetStatus(BaseModel):
     trace_id: str
     cap_usd: float
     on_exceed: Literal["kill", "scope_reduce", "warn"]
+    quantile: Literal["p50", "p90", "p99"] = "p50"
     spent_usd: float
     predicted_remaining_p50_usd: float
     predicted_remaining_p90_usd: float
@@ -406,3 +410,4 @@ class ForecastRequest(BaseModel):
     # Free-form description of the work; not used by the predictor today, but
     # accepted for future similarity-search.
     input: Any | None = None
+    metadata: Any | None = None

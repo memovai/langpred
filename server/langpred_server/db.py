@@ -42,15 +42,17 @@ def _to_json_safe(obj: Any) -> Any:
 @dataclass
 class StoredEvent:
     id: str
+    project_id: str
     type: str
     trace_id: str | None
     observation_id: str | None
     timestamp: str
     body: dict[str, Any]
 
-    def to_row(self) -> tuple[str, str, str | None, str | None, str, str]:
+    def to_row(self) -> tuple[str, str, str, str | None, str | None, str, str]:
         return (
             self.id,
+            self.project_id,
             self.type,
             self.trace_id,
             self.observation_id,
@@ -60,21 +62,28 @@ class StoredEvent:
 
     @classmethod
     def from_row(cls, row: tuple[Any, ...]) -> "StoredEvent":
+        # Older SQLite files did not have project_id. Treat those rows as the
+        # default local project so existing installs migrate cleanly.
+        if len(row) == 6:
+            row = (row[0], "default", row[1], row[2], row[3], row[4], row[5])
         return cls(
             id=row[0],
-            type=row[1],
-            trace_id=row[2],
-            observation_id=row[3],
-            timestamp=row[4],
-            body=json.loads(row[5]) if row[5] else {},
+            project_id=row[1],
+            type=row[2],
+            trace_id=row[3],
+            observation_id=row[4],
+            timestamp=row[5],
+            body=json.loads(row[6]) if row[6] else {},
         )
 
 
 @dataclass
 class BudgetRecord:
     trace_id: str
+    project_id: str
     cap_usd: float
     on_exceed: str
+    quantile: str = "p50"
     breached: bool = False
     breach_reason: str | None = None
     last_spent_usd: float = 0.0
@@ -88,6 +97,7 @@ class BudgetRecord:
 class AlertRuleRecord:
     id: str
     trace_id: str
+    project_id: str
     condition: str
     webhook_url: str
     min_interval_seconds: float = 30.0
@@ -104,10 +114,10 @@ class Store:
         self.database_url = database_url or SETTINGS.database_url
         self._lock = threading.RLock()
         self._events: list[StoredEvent] = []
-        self._by_trace: dict[str, list[int]] = {}  # trace_id -> indices
-        self._budgets: dict[str, BudgetRecord] = {}
+        self._by_trace: dict[tuple[str, str], list[int]] = {}  # (project_id, trace_id)
+        self._budgets: dict[tuple[str, str], BudgetRecord] = {}
         self._alerts: dict[str, AlertRuleRecord] = {}  # id -> rule
-        self._alerts_by_trace: dict[str, list[str]] = {}  # trace_id -> [rule ids]
+        self._alerts_by_trace: dict[tuple[str, str], list[str]] = {}
         self._sqlite: sqlite3.Connection | None = None
         if self.database_url.startswith("sqlite"):
             self._init_sqlite(self.database_url)
@@ -133,6 +143,7 @@ class Store:
             """
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL DEFAULT 'default',
                 type TEXT NOT NULL,
                 trace_id TEXT,
                 observation_id TEXT,
@@ -144,41 +155,62 @@ class Store:
         self._sqlite.execute(
             """
             CREATE TABLE IF NOT EXISTS budgets (
-                trace_id TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'default',
                 cap_usd REAL NOT NULL,
                 on_exceed TEXT NOT NULL,
+                quantile TEXT NOT NULL DEFAULT 'p50',
                 breached INTEGER NOT NULL,
                 breach_reason TEXT,
                 last_spent_usd REAL NOT NULL,
                 last_pred_remaining_p50 REAL NOT NULL,
                 last_pred_remaining_p90 REAL NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, trace_id)
             )
             """
         )
         self._sqlite.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_trace ON events(trace_id)"
+            "CREATE INDEX IF NOT EXISTS idx_events_project_trace ON events(project_id, trace_id)"
         )
+        self._ensure_sqlite_column("events", "project_id", "TEXT NOT NULL DEFAULT 'default'")
+        self._ensure_sqlite_column("budgets", "project_id", "TEXT NOT NULL DEFAULT 'default'")
+        self._ensure_sqlite_column("budgets", "quantile", "TEXT NOT NULL DEFAULT 'p50'")
         self._sqlite.commit()
+
+    def _ensure_sqlite_column(self, table: str, column: str, spec: str) -> None:
+        assert self._sqlite is not None
+        cols = {row[1] for row in self._sqlite.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            self._sqlite.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
 
     def _reload_from_sqlite(self) -> None:
         assert self._sqlite is not None
         cur = self._sqlite.execute(
-            "SELECT id, type, trace_id, observation_id, ts, body FROM events ORDER BY ts ASC"
+            "SELECT id, project_id, type, trace_id, observation_id, ts, body FROM events ORDER BY ts ASC"
         )
         for row in cur.fetchall():
             ev = StoredEvent.from_row(row)
             self._events.append(ev)
             if ev.trace_id:
-                self._by_trace.setdefault(ev.trace_id, []).append(len(self._events) - 1)
-        cur = self._sqlite.execute("SELECT * FROM budgets")
+                self._by_trace.setdefault((ev.project_id, ev.trace_id), []).append(len(self._events) - 1)
+        cur = self._sqlite.execute(
+            """
+            SELECT trace_id, project_id, cap_usd, on_exceed, quantile, breached,
+                   breach_reason, last_spent_usd, last_pred_remaining_p50,
+                   last_pred_remaining_p90, created_at, updated_at
+            FROM budgets
+            """
+        )
         for row in cur.fetchall():
-            (tid, cap, ox, br, br_r, sp, p50, p90, ca, ua) = row
-            self._budgets[tid] = BudgetRecord(
+            (tid, project_id, cap, ox, quantile, br, br_r, sp, p50, p90, ca, ua) = row
+            self._budgets[(project_id, tid)] = BudgetRecord(
                 trace_id=tid,
+                project_id=project_id,
                 cap_usd=cap,
                 on_exceed=ox,
+                quantile=quantile,
                 breached=bool(br),
                 breach_reason=br_r,
                 last_spent_usd=sp,
@@ -193,6 +225,7 @@ class Store:
     def append_event(
         self,
         ev_id: str,
+        project_id: str,
         ev_type: str,
         trace_id: str | None,
         observation_id: str | None,
@@ -201,6 +234,7 @@ class Store:
     ) -> StoredEvent:
         ev = StoredEvent(
             id=ev_id,
+            project_id=project_id,
             type=ev_type,
             trace_id=trace_id,
             observation_id=observation_id,
@@ -210,11 +244,11 @@ class Store:
         with self._lock:
             self._events.append(ev)
             if trace_id:
-                self._by_trace.setdefault(trace_id, []).append(len(self._events) - 1)
+                self._by_trace.setdefault((project_id, trace_id), []).append(len(self._events) - 1)
             if self._sqlite is not None:
                 try:
                     self._sqlite.execute(
-                        "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?)",
+                        "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)",
                         ev.to_row(),
                     )
                     self._sqlite.commit()
@@ -223,14 +257,24 @@ class Store:
                     pass
         return ev
 
-    def events_for_trace(self, trace_id: str) -> list[StoredEvent]:
+    def events_for_trace(self, trace_id: str, project_id: str | None = None) -> list[StoredEvent]:
         with self._lock:
-            idx = self._by_trace.get(trace_id, [])
+            if project_id is None:
+                idx = [
+                    i
+                    for (pid, tid), indices in self._by_trace.items()
+                    if tid == trace_id
+                    for i in indices
+                ]
+            else:
+                idx = self._by_trace.get((project_id, trace_id), [])
             return [self._events[i] for i in idx]
 
-    def all_trace_ids(self) -> list[str]:
+    def all_trace_ids(self, project_id: str | None = None) -> list[str]:
         with self._lock:
-            return list(self._by_trace.keys())
+            if project_id is None:
+                return [tid for _pid, tid in self._by_trace.keys()]
+            return [tid for pid, tid in self._by_trace.keys() if pid == project_id]
 
     def trace_count(self) -> int:
         with self._lock:
@@ -240,17 +284,22 @@ class Store:
 
     def set_budget(self, b: BudgetRecord) -> None:
         with self._lock:
-            self._budgets[b.trace_id] = b
+            self._budgets[(b.project_id, b.trace_id)] = b
             self._persist_budget(b)
 
-    def get_budget(self, trace_id: str) -> BudgetRecord | None:
+    def get_budget(self, trace_id: str, project_id: str | None = None) -> BudgetRecord | None:
         with self._lock:
-            return self._budgets.get(trace_id)
+            if project_id is not None:
+                return self._budgets.get((project_id, trace_id))
+            for (_pid, tid), rec in self._budgets.items():
+                if tid == trace_id:
+                    return rec
+            return None
 
     def update_budget(self, b: BudgetRecord) -> None:
         with self._lock:
             b.updated_at = _now_iso()
-            self._budgets[b.trace_id] = b
+            self._budgets[(b.project_id, b.trace_id)] = b
             self._persist_budget(b)
 
     # ----------------------------------------------------------------- alerts
@@ -258,11 +307,19 @@ class Store:
     def add_alert(self, rule: AlertRuleRecord) -> None:
         with self._lock:
             self._alerts[rule.id] = rule
-            self._alerts_by_trace.setdefault(rule.trace_id, []).append(rule.id)
+            self._alerts_by_trace.setdefault((rule.project_id, rule.trace_id), []).append(rule.id)
 
-    def alerts_for(self, trace_id: str) -> list[AlertRuleRecord]:
+    def alerts_for(self, trace_id: str, project_id: str | None = None) -> list[AlertRuleRecord]:
         with self._lock:
-            ids = self._alerts_by_trace.get(trace_id, [])
+            if project_id is None:
+                ids = [
+                    rule_id
+                    for (_pid, tid), rule_ids in self._alerts_by_trace.items()
+                    if tid == trace_id
+                    for rule_id in rule_ids
+                ]
+            else:
+                ids = self._alerts_by_trace.get((project_id, trace_id), [])
             return [self._alerts[i] for i in ids if i in self._alerts]
 
     def update_alert(self, rule: AlertRuleRecord) -> None:
@@ -276,11 +333,19 @@ class Store:
             return
         try:
             self._sqlite.execute(
-                "INSERT OR REPLACE INTO budgets VALUES (?,?,?,?,?,?,?,?,?,?)",
+                """
+                INSERT OR REPLACE INTO budgets (
+                    trace_id, project_id, cap_usd, on_exceed, quantile, breached,
+                    breach_reason, last_spent_usd, last_pred_remaining_p50,
+                    last_pred_remaining_p90, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
                 (
                     b.trace_id,
+                    b.project_id,
                     b.cap_usd,
                     b.on_exceed,
+                    b.quantile,
                     int(b.breached),
                     b.breach_reason,
                     b.last_spent_usd,

@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Response
 
 from . import alerts as alerts_mod
+from .auth import project_id_from_authorization
 from .db import get_store
 from .budget import evaluate as evaluate_budget
 from .schemas import (
@@ -49,12 +50,13 @@ def _observation_id_from(ev: IngestionEvent) -> str | None:
     return body.get("id")
 
 
-def _store_event(ev: IngestionEvent) -> IngestionEventResult:
+def _store_event(ev: IngestionEvent, project_id: str) -> IngestionEventResult:
     try:
         trace_id = _trace_id_from(ev)
         observation_id = _observation_id_from(ev)
         get_store().append_event(
             ev_id=ev.id,
+            project_id=project_id,
             ev_type=ev.type,
             trace_id=trace_id,
             observation_id=observation_id,
@@ -73,12 +75,13 @@ async def ingest(
     response: Response,
     authorization: str | None = Header(default=None),
 ) -> IngestionResponse:
+    project_id = project_id_from_authorization(authorization)
     successes: list[IngestionEventResult] = []
     errors: list[IngestionEventResult] = []
     touched_trace_ids: set[str] = set()
 
     for ev in batch.batch:
-        result = _store_event(ev)
+        result = _store_event(ev, project_id)
         (successes if result.status < 400 else errors).append(result)
         tid = _trace_id_from(ev)
         if tid:
@@ -89,7 +92,7 @@ async def ingest(
     scope_reduce: list[str] = []
     fired_alerts: list[str] = []
     for tid in touched_trace_ids:
-        st = evaluate_budget(tid)
+        st = evaluate_budget(tid, project_id=project_id)
         if st and st.breached:
             if st.on_exceed == "scope_reduce":
                 scope_reduce.append(tid)
@@ -97,7 +100,7 @@ async def ingest(
                 breached.append(tid)
             # "warn" → log only; SDK takes no action
         # Alerts are independent of budgets — evaluate unconditionally.
-        fired_alerts.extend(alerts_mod.evaluate_for_trace(tid))
+        fired_alerts.extend(alerts_mod.evaluate_for_trace(tid, project_id=project_id))
 
     if breached:
         response.headers["X-Langpred-Budget"] = "breached"

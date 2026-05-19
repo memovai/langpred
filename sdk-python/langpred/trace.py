@@ -294,6 +294,7 @@ class Trace:
         self,
         usd: float,
         on_exceed: str = "kill",
+        quantile: str = "p50",
     ) -> BudgetGuard:
         """Cap predicted total spend. ``on_exceed`` is one of:
 
@@ -304,6 +305,9 @@ class Trace:
           so KV cache is preserved.
         - ``"warn"`` — log only, no kill, no callback.
 
+        ``quantile`` selects the predicted remaining-cost band used for the
+        breach decision. Use ``"p90"``/``"p99"`` for stricter hard caps.
+
         Note: there is no ``"downgrade"`` here — switching models mid-trace
         breaks Anthropic prompt caching and reasoning coherence. Use
         :meth:`Langpred.forecast` at trace-start to pick a model **before**
@@ -313,12 +317,25 @@ class Trace:
             raise ValueError(
                 f"on_exceed must be 'kill' | 'scope_reduce' | 'warn', got {on_exceed!r}"
             )
+        if quantile not in ("p50", "p90", "p99"):
+            raise ValueError(
+                f"quantile must be 'p50' | 'p90' | 'p99', got {quantile!r}"
+            )
         self.transport.post(
             "/api/public/budgets",
-            {"trace_id": self.id, "cap_usd": usd, "on_exceed": on_exceed},
+            {
+                "trace_id": self.id,
+                "cap_usd": usd,
+                "on_exceed": on_exceed,
+                "quantile": quantile,
+            },
         )
         return BudgetGuard(
-            trace=self, transport=self.transport, cap_usd=usd, on_exceed=on_exceed
+            trace=self,
+            transport=self.transport,
+            cap_usd=usd,
+            on_exceed=on_exceed,
+            quantile=quantile,
         )
 
     # -------------------------------------------------------------- alerts

@@ -95,12 +95,13 @@ def evaluate_condition(pred: AgentPrediction, condition: str) -> tuple[bool, flo
 # ---------------------------------------------------------------- registration
 
 
-def register(rule: AlertRule) -> AlertRuleStatus:
+def register(rule: AlertRule, project_id: str = "default") -> AlertRuleStatus:
     # Validate syntactically up-front so we fail loud at registration time.
     parse_condition(rule.condition)
     rec = AlertRuleRecord(
         id=rule.id or str(uuid.uuid4()),
         trace_id=rule.trace_id,
+        project_id=project_id,
         condition=rule.condition,
         webhook_url=rule.webhook_url,
         min_interval_seconds=rule.min_interval_seconds,
@@ -109,8 +110,8 @@ def register(rule: AlertRule) -> AlertRuleStatus:
     return _to_status(rec)
 
 
-def list_for(trace_id: str) -> list[AlertRuleStatus]:
-    return [_to_status(r) for r in get_store().alerts_for(trace_id)]
+def list_for(trace_id: str, project_id: str = "default") -> list[AlertRuleStatus]:
+    return [_to_status(r) for r in get_store().alerts_for(trace_id, project_id=project_id)]
 
 
 def _to_status(r: AlertRuleRecord) -> AlertRuleStatus:
@@ -128,14 +129,14 @@ def _to_status(r: AlertRuleRecord) -> AlertRuleStatus:
 # -------------------------------------------------------------- evaluation
 
 
-def evaluate_for_trace(trace_id: str) -> list[str]:
+def evaluate_for_trace(trace_id: str, project_id: str = "default") -> list[str]:
     """Evaluate all rules attached to a trace. Fire webhooks where due.
     Returns the list of alert rule ids that fired during this call."""
     store = get_store()
-    rules = store.alerts_for(trace_id)
+    rules = store.alerts_for(trace_id, project_id=project_id)
     if not rules:
         return []
-    pred = get_service().predict_all(trace_id)
+    pred = get_service().predict_all(trace_id, project_id=project_id)
     if pred is None:
         return []
     fired: list[str] = []

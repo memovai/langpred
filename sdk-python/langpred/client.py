@@ -51,6 +51,7 @@ class Langpred:
         user_id: str | None = None,
         session_id: str | None = None,
         input: Any | None = None,
+        metadata: Any | None = None,
     ) -> AgentPrediction:
         """Forecast a hypothetical trace **before** creating it. Powers
         reject-upfront ("don't even start, predicted cost is too high") and
@@ -66,6 +67,7 @@ class Langpred:
                 "user_id": user_id,
                 "session_id": session_id,
                 "input": input,
+                "metadata": metadata,
             },
         )
         return AgentPrediction.from_response(body)

@@ -202,13 +202,17 @@ class KNNPredictor:
         likely_next_model = next_models.most_common(1)[0][0] if next_models else None
         p_finish_within_one_step = finished_within_one / n
 
-        # Per-tool histograms over *full* neighbour trajectories.
+        # Per-tool histograms over each neighbour's remaining suffix.
         tool_call_counts_p50: dict[str, float] = {}
         tool_call_counts_p90: dict[str, float] = {}
         all_tools: set[str] = set()
         per_neighbour_hist: list[dict[str, int]] = []
         for nb in neighbours:
-            h = nb.trajectory.tool_histogram()
+            h: dict[str, int] = {}
+            for step in nb.trajectory.steps[prefix_len:]:
+                if step.is_tool:
+                    name = step.tool_name or step.name or "unknown"
+                    h[name] = h.get(name, 0) + 1
             per_neighbour_hist.append(h)
             all_tools.update(h)
         for tool in all_tools:
@@ -216,13 +220,16 @@ class KNNPredictor:
             tool_call_counts_p50[tool] = _quantile(counts, 0.5)
             tool_call_counts_p90[tool] = _quantile(counts, 0.9)
 
-        # Per-model cost split.
+        # Per-model cost split over each neighbour's remaining suffix.
         usd_by_model_p50: dict[str, float] = {}
         usd_by_model_p90: dict[str, float] = {}
         all_models: set[str] = set()
         per_neighbour_model_cost: list[dict[str, float]] = []
         for nb in neighbours:
-            m = nb.trajectory.model_cost_histogram()
+            m: dict[str, float] = {}
+            for step in nb.trajectory.steps[prefix_len:]:
+                if step.kind == "generation" and step.model:
+                    m[step.model] = m.get(step.model, 0.0) + step.usd
             per_neighbour_model_cost.append(m)
             all_models.update(m)
         for model in all_models:

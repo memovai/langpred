@@ -35,6 +35,7 @@ class BudgetGuard:
     transport: "Transport"
     cap_usd: float
     on_exceed: str
+    quantile: str = "p50"
 
     # ------------------------------------------------------------- check
 

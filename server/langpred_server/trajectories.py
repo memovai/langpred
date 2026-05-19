@@ -65,10 +65,15 @@ class Trajectory:
     name: str | None
     start_ts: datetime | None
     end_ts: datetime | None
+    project_id: str = "default"
     steps: list[Step] = field(default_factory=list)
     status: str = "open"  # "open" | "ok" | "error" | "cancelled"
     user_id: str | None = None
     session_id: str | None = None
+    input: Any | None = None
+    metadata: Any | None = None
+    release: str | None = None
+    version: str | None = None
 
     @property
     def total_usd(self) -> float:
@@ -157,6 +162,7 @@ class Trajectory:
     def prefix(self, k: int) -> "Trajectory":
         clipped = Trajectory(
             trace_id=self.trace_id,
+            project_id=self.project_id,
             name=self.name,
             start_ts=self.start_ts,
             end_ts=self.steps[k - 1].end_ts if k and self.steps[: k][-1:] else None,
@@ -164,6 +170,10 @@ class Trajectory:
             status="open",
             user_id=self.user_id,
             session_id=self.session_id,
+            input=self.input,
+            metadata=self.metadata,
+            release=self.release,
+            version=self.version,
         )
         return clipped
 
@@ -223,7 +233,8 @@ def build_trajectory(events: Iterable[StoredEvent]) -> Trajectory | None:
     if not trace_id:
         return None
 
-    traj = Trajectory(trace_id=trace_id, name=None, start_ts=None, end_ts=None)
+    project_id = next((e.project_id for e in evs if e.project_id), "default")
+    traj = Trajectory(trace_id=trace_id, project_id=project_id, name=None, start_ts=None, end_ts=None)
     observations: dict[str, Step] = {}
 
     for ev in evs:
@@ -233,6 +244,10 @@ def build_trajectory(events: Iterable[StoredEvent]) -> Trajectory | None:
             traj.name = body.get("name") or traj.name
             traj.user_id = body.get("userId") or traj.user_id
             traj.session_id = body.get("sessionId") or traj.session_id
+            traj.input = body.get("input") if body.get("input") is not None else traj.input
+            traj.metadata = body.get("metadata") if body.get("metadata") is not None else traj.metadata
+            traj.release = body.get("release") or traj.release
+            traj.version = body.get("version") or traj.version
             ts = _parse_dt(body.get("timestamp")) or _parse_dt(ev.timestamp)
             if ts and (traj.start_ts is None or ts < traj.start_ts):
                 traj.start_ts = ts
@@ -308,17 +323,24 @@ def build_trajectory(events: Iterable[StoredEvent]) -> Trajectory | None:
     return traj
 
 
-def get_trajectory(trace_id: str, store: Store | None = None) -> Trajectory | None:
+def get_trajectory(
+    trace_id: str,
+    store: Store | None = None,
+    project_id: str | None = None,
+) -> Trajectory | None:
     store = store or get_store()
-    events = store.events_for_trace(trace_id)
+    events = store.events_for_trace(trace_id, project_id=project_id)
     return build_trajectory(events)
 
 
-def all_trajectories(store: Store | None = None) -> list[Trajectory]:
+def all_trajectories(
+    store: Store | None = None,
+    project_id: str | None = None,
+) -> list[Trajectory]:
     store = store or get_store()
     out: list[Trajectory] = []
-    for tid in store.all_trace_ids():
-        traj = build_trajectory(store.events_for_trace(tid))
+    for tid in store.all_trace_ids(project_id=project_id):
+        traj = build_trajectory(store.events_for_trace(tid, project_id=project_id))
         if traj is not None:
             out.append(traj)
     return out
